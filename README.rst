@@ -1,5 +1,7 @@
 A python package for Bayesian Inference of gravitational-wave experimental data.
 
+This is my local development fork.
+
 |PyPI| |Versions| |License|
 
 |TravisCI| |LatestDocs| |CodeClimate| |Coveralls|
