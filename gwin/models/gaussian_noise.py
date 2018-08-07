@@ -18,10 +18,12 @@
 
 import numpy
 from scipy import special
+from scipy import interpolate
 
 from pycbc import filter
 from pycbc.waveform import NoWaveformError
 from pycbc.types import Array
+from pycbc.filter.matchedfilter import matched_filter_core
 
 from .base_data import BaseDataModel
 
@@ -111,31 +113,31 @@ class GaussianNoise(BaseDataModel):
 
     Examples
     --------
-    Create a signal, and set up the model on that signal:
+    Create a signal, and set up the model using that signal:
 
     >>> from pycbc import psd as pypsd
     >>> from pycbc.waveform.generator import (FDomainDetFrameGenerator,
-                                              FDomainCBCGenerator)
+    ...                                       FDomainCBCGenerator)
     >>> import gwin
     >>> seglen = 4
     >>> sample_rate = 2048
     >>> N = seglen*sample_rate/2+1
     >>> fmin = 30.
     >>> m1, m2, s1z, s2z, tsig, ra, dec, pol, dist = (
-            38.6, 29.3, 0., 0., 3.1, 1.37, -1.26, 2.76, 3*500.)
+    ...     38.6, 29.3, 0., 0., 3.1, 1.37, -1.26, 2.76, 3*500.)
     >>> variable_params = ['tc']
     >>> generator = FDomainDetFrameGenerator(
-            FDomainCBCGenerator, 0.,
-            variable_args=variable_params, detectors=['H1', 'L1'],
-            delta_f=1./seglen, f_lower=fmin,
-            approximant='SEOBNRv2_ROM_DoubleSpin',
-            mass1=m1, mass2=m2, spin1z=s1z, spin2z=s2z,
-            ra=ra, dec=dec, polarization=pol, distance=dist)
+    ...     FDomainCBCGenerator, 0.,
+    ...     variable_args=variable_params, detectors=['H1', 'L1'],
+    ...     delta_f=1./seglen, f_lower=fmin,
+    ...     approximant='SEOBNRv2_ROM_DoubleSpin',
+    ...     mass1=m1, mass2=m2, spin1z=s1z, spin2z=s2z,
+    ...     ra=ra, dec=dec, polarization=pol, distance=dist)
     >>> signal = generator.generate(tc=tsig)
     >>> psd = pypsd.aLIGOZeroDetHighPower(N, 1./seglen, 20.)
     >>> psds = {'H1': psd, 'L1': psd}
     >>> model = gwin.models.GaussianNoise(
-            variable_params, signal, generator, fmin, psds=psds)
+    ...     variable_params, signal, generator, fmin, psds=psds)
 
     Set the current position to the coalescence time of the signal:
 
@@ -144,33 +146,38 @@ class GaussianNoise(BaseDataModel):
     Now compute the log likelihood ratio and prior-weighted likelihood ratio;
     since we have not provided a prior, these should be equal to each other:
 
-    >>> model.loglr
-    278.9612860719217
-    >>> model.logplr
-    278.9612860719217
+    >>> print('{:.2f}'.format(model.loglr))
+    278.96
+    >>> print('{:.2f}'.format(model.logplr))
+    278.96
 
     Print all of the default_stats:
 
-    >>> model.current_stats
-    {'H1_cplx_loglr': (175.56552899471038+0j),
-     'H1_optimal_snrsq': 351.13105798942075,
-     'L1_cplx_loglr': (103.39575707721129+0j),
-     'L1_optimal_snrsq': 206.79151415442257,
-     'logjacobian': 0.0,
-     'loglr': 278.9612860719217,
-     'logprior': 0.0}
+    >>> print(',\n'.join(['{}: {:.2f}'.format(s, v)
+    ...                   for (s, v) in sorted(model.current_stats.items())]))
+    H1_cplx_loglr: 175.57+0.00j,
+    H1_optimal_snrsq: 351.13,
+    L1_cplx_loglr: 103.40+0.00j,
+    L1_optimal_snrsq: 206.79,
+    logjacobian: 0.00,
+    loglikelihood: 0.00,
+    loglr: 278.96,
+    logprior: 0.00
 
     Compute the SNR; for this system and PSD, this should be approximately 24:
 
     >>> from pycbc.conversions import snr_from_loglr
-    >>> snr_from_loglr(model.loglr)
-    23.62038467391764
+    >>> x = snr_from_loglr(model.loglr)
+    >>> print('{:.2f}'.format(x))
+    23.62
 
     Since there is no noise, the SNR should be the same as the quadrature sum
     of the optimal SNRs in each detector:
 
-    >>> (model.det_optimal_snrsq('H1') + model.det_optimal_snrsq('L1'))**0.5
-    23.62038467391764
+    >>> x = (model.det_optimal_snrsq('H1') +
+    ...      model.det_optimal_snrsq('L1'))**0.5
+    >>> print('{:.2f}'.format(x))
+    23.62
 
     Using the same model, evaluate the log likelihood ratio at several points
     in time and check that the max is at tsig:
@@ -179,11 +186,11 @@ class GaussianNoise(BaseDataModel):
     >>> times = numpy.arange(seglen*sample_rate)/float(sample_rate)
     >>> loglrs = numpy.zeros(len(times))
     >>> for (ii, t) in enumerate(times):
-            model.update(tc=t)
-            loglrs[ii] = model.loglr
-    >>> print('tsig: {}, time of max loglr: {}'.format(
-            tsig, times[loglrs.argmax()]))
-    tsig: 3.1, time of max loglr: 3.10009765625
+    ...     model.update(tc=t)
+    ...     loglrs[ii] = model.loglr
+    >>> print('tsig: {:.3f}, time of max loglr: {:.3f}'.format(
+    ...     tsig, times[loglrs.argmax()]))
+    tsig: 3.100, time of max loglr: 3.100
 
     Create a prior and use it (see distributions module for more details):
 
@@ -191,18 +198,20 @@ class GaussianNoise(BaseDataModel):
     >>> uniform_prior = distributions.Uniform(tc=(tsig-0.2,tsig+0.2))
     >>> prior = distributions.JointDistribution(variable_params, uniform_prior)
     >>> model = gwin.models.GaussianNoise(variable_params,
-            signal, generator, 20., psds=psds, prior=prior)
+    ...     signal, generator, 20., psds=psds, prior=prior)
     >>> model.update(tc=tsig)
-    >>> model.logplr
-    279.8775768037958
-    >>> model.current_stats
-    {'H1_cplx_loglr': (175.56552899471038+0j),
-     'H1_optimal_snrsq': 351.13105798942075,
-     'L1_cplx_loglr': (103.39575707721127+0j),
-     'L1_optimal_snrsq': 206.79151415442254,
-     'logjacobian': 0.0,
-     'loglr': 278.9612860719217,
-     'logprior': 0.9162907318741542}
+    >>> print('{:.2f}'.format(model.logplr))
+    279.88
+    >>> print(',\n'.join(['{}: {:.2f}'.format(s, v)
+    ...                   for (s, v) in sorted(model.current_stats.items())]))
+    H1_cplx_loglr: 175.57+0.00j,
+    H1_optimal_snrsq: 351.13,
+    L1_cplx_loglr: 103.40+0.00j,
+    L1_optimal_snrsq: 206.79,
+    logjacobian: 0.00,
+    loglikelihood: 0.00,
+    loglr: 278.96,
+    logprior: 0.92
 
     """
     name = 'gaussian_noise'
@@ -256,9 +265,10 @@ class GaussianNoise(BaseDataModel):
             self._data[det][kmin:kmax] *= self._weight[det][kmin:kmax]
 
     @property
-    def default_stats(self):
-        """The stats that ``get_current_stats`` returns by default."""
-        return ['logjacobian', 'logprior', 'loglr'] + \
+    def _extra_stats(self):
+        """Adds ``loglr``, plus ``cplx_loglr`` and ``optimal_snrsq`` in each
+        detector."""
+        return ['loglr'] + \
                ['{}_cplx_loglr'.format(det) for det in self._data] + \
                ['{}_optimal_snrsq'.format(det) for det in self._data]
 
@@ -284,6 +294,7 @@ class GaussianNoise(BaseDataModel):
         """Convenience function to set loglr values if no waveform generated.
         """
         for det in self._data:
+            setattr(self._current_stats, 'loglikelihood', -numpy.inf)
             setattr(self._current_stats, '{}_cplx_loglr'.format(det),
                     -numpy.inf)
             # snr can't be < 0 by definition, so return 0
@@ -333,6 +344,9 @@ class GaussianNoise(BaseDataModel):
             setattr(self._current_stats, '{}_cplx_loglr'.format(det),
                     cplx_loglr)
             lr += cplx_loglr.real
+        # also store the loglikelihood, to ensure it is populated in the
+        # current stats even if loglikelihood is never called
+        self._current_stats.loglikelihood = lr + self.lognl
         return float(lr)
 
     def _loglikelihood(self):
@@ -418,140 +432,3 @@ class GaussianNoise(BaseDataModel):
             self.loglr
             # now try returning again
             return getattr(self._current_stats, '{}_optimal_snrsq'.format(det))
-
-
-class MarginalizedPhaseGaussianNoise(GaussianNoise):
-    r"""The likelihood is analytically marginalized over phase.
-
-    This class can be used with signal models that can be written as:
-
-    .. math::
-
-        \tilde{h}(f; \Theta, \phi) = A(f; \Theta)e^{i\Psi(f; \Theta) + i \phi},
-
-    where :math:`\phi` is an arbitrary phase constant. This phase constant
-    can be analytically marginalized over with a uniform prior as follows:
-    assuming the noise is stationary and Gaussian (see `GaussianNoise`
-    for details), the posterior is:
-
-    .. math::
-
-        p(\Theta,\phi|d)
-            &\propto p(\Theta)p(\phi)p(d|\Theta,\phi) \\
-            &\propto p(\Theta)\frac{1}{2\pi}\exp\left[
-                -\frac{1}{2}\sum_{i}^{N_D} \left<
-                    h_i(\Theta,\phi) - d_i, h_i(\Theta,\phi) - d_i
-                \right>\right].
-
-    Here, the sum is over the number of detectors :math:`N_D`, :math:`d_i`
-    and :math:`h_i` are the data and signal in detector :math:`i`,
-    respectively, and we have assumed a uniform prior on :math:`phi \in [0,
-    2\pi)`. With the form of the signal model given above, the inner product
-    in the exponent can be written as:
-
-    .. math::
-
-        -\frac{1}{2}\left<h_i - d_i, h_i- d_i\right>
-            &= \left<h_i, d_i\right> -
-               \frac{1}{2}\left<h_i, h_i\right> -
-               \frac{1}{2}\left<d_i, d_i\right> \\
-            &= \Re\left\{O(h^0_i, d_i)e^{-i\phi}\right\} -
-               \frac{1}{2}\left<h^0_i, h^0_i\right> -
-               \frac{1}{2}\left<d_i, d_i\right>,
-
-    where:
-
-    .. math::
-
-        h_i^0 &\equiv \tilde{h}_i(f; \Theta, \phi=0); \\
-        O(h^0_i, d_i) &\equiv 4 \int_0^\infty
-            \frac{\tilde{h}_i^*(f; \Theta,0)\tilde{d}_i(f)}{S_n(f)}\mathrm{d}f.
-
-    Gathering all of the terms that are not dependent on :math:`\phi` together:
-
-    .. math::
-
-        \alpha(\Theta, d) \equiv \exp\left[-\frac{1}{2}\sum_i
-            \left<h^0_i, h^0_i\right> + \left<d_i, d_i\right>\right],
-
-    we can marginalize the posterior over :math:`\phi`:
-
-    .. math::
-
-        p(\Theta|d)
-            &\propto p(\Theta)\alpha(\Theta,d)\frac{1}{2\pi}
-                     \int_{0}^{2\pi}\exp\left[\Re \left\{
-                         e^{-i\phi} \sum_i O(h^0_i, d_i)
-                     \right\}\right]\mathrm{d}\phi \\
-            &\propto p(\Theta)\alpha(\Theta, d)\frac{1}{2\pi}
-                     \int_{0}^{2\pi}\exp\left[
-                         x(\Theta,d)\cos(\phi) + y(\Theta, d)\sin(\phi)
-                     \right]\mathrm{d}\phi.
-
-    The integral in the last line is equal to :math:`2\pi I_0(\sqrt{x^2+y^2})`,
-    where :math:`I_0` is the modified Bessel function of the first kind. Thus
-    the marginalized log posterior is:
-
-    .. math::
-
-        \log p(\Theta|d) \propto \log p(\Theta) +
-            I_0\left(\left|\sum_i O(h^0_i, d_i)\right|\right) -
-            \frac{1}{2}\sum_i\left[ \left<h^0_i, h^0_i\right> -
-                                    \left<d_i, d_i\right> \right]
-
-    This class computes the above expression for the log likelihood.
-    """
-    name = 'marginalized_phase'
-
-    @property
-    def default_stats(self):
-        """The stats that ``get_current_stats`` returns by default."""
-        return ['logjacobian', 'logprior', 'loglr'] + \
-               ['{}_optimal_snrsq'.format(det) for det in self._data]
-
-    def _loglr(self):
-        r"""Computes the log likelihood ratio,
-
-        .. math::
-
-            \log \mathcal{L}(\Theta) =
-                I_0 \left(\left|\sum_i O(h^0_i, d_i)\right|\right) -
-                \frac{1}{2}\left<h^0_i, h^0_i\right>,
-
-        at the current point in parameter space :math:`\Theta`.
-
-        Returns
-        -------
-        float
-            The value of the log likelihood ratio evaluated at the given point.
-        """
-        params = self.current_params
-        try:
-            wfs = self._waveform_generator.generate(**params)
-        except NoWaveformError:
-            return self._nowaveform_loglr()
-        hh = 0.
-        hd = 0j
-        for det, h in wfs.items():
-            # the kmax of the waveforms may be different than internal kmax
-            kmax = min(len(h), self._kmax)
-            if self._kmin >= kmax:
-                # if the waveform terminates before the filtering low frequency
-                # cutoff, then the loglr is just 0 for this detector
-                hh_i = 0.
-                hd_i = 0j
-            else:
-                # whiten the waveform
-                h[self._kmin:kmax] *= self._weight[det][self._kmin:kmax]
-                # calculate inner products
-                hh_i = h[self._kmin:kmax].inner(h[self._kmin:kmax]).real
-                hd_i = self.data[det][self._kmin:kmax].inner(
-                    h[self._kmin:kmax])
-            # store
-            setattr(self._current_stats, '{}_optimal_snrsq'.format(det), hh_i)
-            # TODO: is it possible to store a something like cplx_loglr for
-            # each detector?
-            hh += hh_i
-            hd += hd_i
-        hd = abs(hd)
-        return numpy.log(special.i0e(hd)) + hd - 0.5*hh
